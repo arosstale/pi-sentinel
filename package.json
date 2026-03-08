@@ -1,14 +1,33 @@
 {
   "name": "@artale/pi-sentinel",
-  "version": "2.1.0",
+  "version": "2.1.1",
   "description": "Agent security framework. Immutable audit trail, permission policies, self-modification detection, destructive command guard.",
-  "keywords": ["pi-package", "pi-extension", "security", "audit", "sentinel", "agent-safety", "guardrails"],
+  "keywords": [
+    "pi-package",
+    "pi-extension",
+    "security",
+    "audit",
+    "sentinel",
+    "agent-safety",
+    "guardrails"
+  ],
   "license": "MIT",
   "author": "artale",
-  "repository": { "type": "git", "url": "https://github.com/arosstale/pi-sentinel.git" },
-  "extensions": ["extensions/pi-sentinel.ts"],
+  "repository": {
+    "type": "git",
+    "url": "https://github.com/arosstale/pi-sentinel.git"
+  },
+  "extensions": [
+    "extensions/pi-sentinel.ts"
+  ],
   "pi": {
-    "commands": ["sentinel"],
-    "tools": ["sentinel_policy", "sentinel_audit", "sentinel_scan"]
+    "commands": [
+      "sentinel"
+    ],
+    "tools": [
+      "sentinel_policy",
+      "sentinel_audit",
+      "sentinel_scan"
+    ]
   }
 }

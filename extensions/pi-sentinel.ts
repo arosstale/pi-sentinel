@@ -214,7 +214,7 @@ export default function (pi: ExtensionAPI) {
     /damage-control-rules\.yaml/,     // PAI safety rules
     /\.bashrc|\.bash_profile|\.zshrc/, // Shell configs
     /\.ssh\//,                         // SSH keys
-    /\.env/,                           // Environment secrets
+    /\/\.env(?:\.|$)/,                  // Environment secrets (.env, .env.local, not pi-envman)
   ];
 
   // ── Destructive Command Guard + Self-Modification Detection ──────
