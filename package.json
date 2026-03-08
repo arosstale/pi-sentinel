@@ -1,6 +1,6 @@
 {
   "name": "@artale/pi-sentinel",
-  "version": "2.2.0",
+  "version": "2.3.0",
   "description": "Agent security framework. Immutable audit trail, permission policies, self-modification detection, destructive command guard.",
   "keywords": [
     "pi-package",

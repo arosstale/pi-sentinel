@@ -1,9 +1,10 @@
 /**
- * pi-sentinel v2.2.0 — Agent Security Framework
+ * pi-sentinel v2.3.0 — Agent Security Framework
  * 
  * Immutable audit trail, permission policies, session integrity, anomaly detection.
  * Based on 0DIN research (Feb 2026): "Context is the control plane."
  * + Clinejection supply chain attack patterns (Mar 2026, Adnan Khan)
+ * + Cacheract IoC detection & cache-sharing audit (v2.3.0)
  * 
  * /sentinel status       → show current policies and audit stats
  * /sentinel audit [n]    → show last N audit entries
@@ -128,12 +129,24 @@ const SUPPLY_CHAIN_PATTERNS: BlockRule[] = [
   { pattern: /\bvsce\s+publish\b/i, reason: "VSCode extension publish — verify release approval gate exists" },
 ];
 
+// ── Cacheract IoC Patterns (from Clinejection deep-dive, Mar 8 2026) ─
+// Cacheract persists by overwriting actions/checkout action.yml post step.
+// IoC: post-checkout with no output (empty step), or checkout action with modified post field.
+const CACHERACT_IOC_PATTERNS = [
+  /actions\/checkout.*post.*(?:silent|empty)/i,        // Modified post step
+  /\bcacheract\b/i,                                      // Direct reference to tool
+  /cache.*10\s*[gG][bB].*junk|junk.*10\s*[gG][bB]/i,  // Cache flooding pattern
+  /evict.*cache.*entries/i,                              // Eviction language
+];
+
 // ── CI/CD Security Audit Patterns ─────────────────────────────────
 const CI_SECURITY_CHECKS = [
   { file: ".github/workflows/*.yml", check: "cache-isolation", desc: "Triage and release workflows should NOT share cache keys" },
   { file: ".github/workflows/*.yml", check: "secret-separation", desc: "Triage PATs ≠ release PATs (principle of least privilege)" },
   { file: ".github/workflows/*.yml", check: "tool-restriction", desc: "Agent tools should be minimal for each workflow purpose" },
   { file: ".github/workflows/*.yml", check: "input-sanitization", desc: "User input (issue title/body) must not be interpolated into prompts" },
+  { file: ".github/workflows/*.yml", check: "cacheract-ioc", desc: "Cacheract-style cache poisoning indicators" },
+  { file: ".github/workflows/*.yml", check: "cache-cross-workflow", desc: "Cache keys shared between privileged and unprivileged workflows" },
 ];
 
 function detectReframes(text: string): string[] {
@@ -236,7 +249,7 @@ export default function (pi: ExtensionAPI) {
   ensureDir();
   
   // Log extension load itself
-  auditLog({ type: "system", action: "sentinel_loaded", version: "2.2.0" });
+  auditLog({ type: "system", action: "sentinel_loaded", version: "2.3.0" });
 
   // ── Safety-Critical Paths (self-modification detection) ─────────
   // Based on Palisade Research: o3 altered its own shutdown script
@@ -371,14 +384,61 @@ export default function (pi: ExtensionAPI) {
         const { readdirSync: readDir2, readFileSync: readFile2, existsSync: exists2 } = await import("node:fs");
         const { join: join2 } = await import("node:path");
         const workflowDir = join2(process.cwd(), ".github", "workflows");
-        let out = `${B}${CYAN}🔒 CI/CD Security Scan (Clinejection Patterns)${RST}\n`;
-        out += `${D}Based on Adnan Khan's Cline supply chain attack disclosure${RST}\n\n`;
+        let out = `${B}${CYAN}🔒 CI/CD Security Scan (Clinejection + Cacheract)${RST}\n`;
+        out += `${D}Based on Adnan Khan's Cline supply chain attack (full deep-dive, Mar 8 2026)${RST}\n\n`;
         
         if (!exists2(workflowDir)) {
           out += `${YELLOW}No .github/workflows/ found in current directory.${RST}\n`;
         } else {
           const yamlFiles = readDir2(workflowDir).filter(f => f.endsWith(".yml") || f.endsWith(".yaml"));
           let totalIssues = 0;
+          
+          // ── Cross-workflow cache analysis ─────────────────────────
+          // Clinejection key insight: triage + release sharing same cache key
+          const cacheKeysByFile: Record<string, { keys: string[]; hasSecrets: boolean; trigger: string }> = {};
+          for (const file of yamlFiles) {
+            const content = readFile2(join2(workflowDir, file), "utf-8");
+            const keys: string[] = [];
+            // Extract cache key patterns
+            const keyMatches = content.matchAll(/key:\s*(.+)/g);
+            for (const m of keyMatches) keys.push(m[1].trim());
+            // Detect trigger and secrets
+            const hasSecrets = /secrets\.(NPM_TOKEN|VSCE_PAT|OVSX_PAT|PYPI_TOKEN|PUBLISH|RELEASE)/i.test(content);
+            const isIssueTrigger = /on:\s*\n\s*(issues|issue_comment|pull_request_target)/m.test(content);
+            const isSchedule = /on:\s*\n\s*schedule/m.test(content);
+            const trigger = isIssueTrigger ? "issue" : isSchedule ? "schedule" : "other";
+            cacheKeysByFile[file] = { keys, hasSecrets, trigger };
+          }
+          
+          // Find shared cache keys between privileged and unprivileged workflows
+          const sharedCacheIssues: string[] = [];
+          const fileNames = Object.keys(cacheKeysByFile);
+          for (let i = 0; i < fileNames.length; i++) {
+            for (let j = i + 1; j < fileNames.length; j++) {
+              const a = cacheKeysByFile[fileNames[i]], b = cacheKeysByFile[fileNames[j]];
+              if (!a.keys.length || !b.keys.length) continue;
+              const shared = a.keys.filter(k => b.keys.some(bk => bk === k || (k.includes("hashFiles") && bk.includes("hashFiles") && k.split("hashFiles")[1] === bk.split("hashFiles")[1])));
+              if (shared.length > 0) {
+                const aPriv = a.hasSecrets, bPriv = b.hasSecrets;
+                const aIssue = a.trigger === "issue", bIssue = b.trigger === "issue";
+                if ((aPriv && bIssue) || (bPriv && aIssue)) {
+                  sharedCacheIssues.push(`${RED}CRITICAL:${RST} ${B}Cache key shared between privileged & issue-triggered workflows!${RST}\n      ${fileNames[i]} ↔ ${fileNames[j]}\n      Key: ${shared[0].slice(0, 80)}\n      ${D}This is the exact Clinejection attack vector — cache poisoning from triage → release${RST}`);
+                } else if ((aPriv || bPriv) && shared.length) {
+                  sharedCacheIssues.push(`${YELLOW}HIGH:${RST} Shared cache key between workflows with different privilege levels\n      ${fileNames[i]} ↔ ${fileNames[j]}\n      Key: ${shared[0].slice(0, 80)}`);
+                }
+              }
+            }
+          }
+          
+          if (sharedCacheIssues.length) {
+            out += `${RED}${B}🔗 CROSS-WORKFLOW CACHE ANALYSIS${RST}\n`;
+            for (const issue of sharedCacheIssues) {
+              out += `  ${issue}\n\n`;
+              totalIssues++;
+            }
+          }
+          
+          // ── Per-file checks ──────────────────────────────────────
           for (const file of yamlFiles) {
             const content = readFile2(join2(workflowDir, file), "utf-8");
             const issues: string[] = [];
@@ -394,19 +454,34 @@ export default function (pi: ExtensionAPI) {
             if (/allowed[_-]?non[_-]?write[_-]?users.*\*/i.test(content)) {
               issues.push(`${RED}HIGH:${RST} Wildcard non-write user access — any GitHub user can trigger`);
             }
-            // Check cache sharing between workflows
+            // Cache restore-keys in publish workflow — prefix matching enables poisoning
             if (/restore-keys/i.test(content) && /publish|release|deploy/i.test(content)) {
-              issues.push(`${YELLOW}MEDIUM:${RST} Cache restore-keys in release workflow — cache poisoning risk`);
+              issues.push(`${YELLOW}MEDIUM:${RST} Cache restore-keys in release workflow — prefix matching enables cache poisoning`);
+            }
+            // actions/cache in release workflows (Clinejection lesson: don't cache in release)
+            if (/actions\/cache/i.test(content) && /publish|release/i.test(content) && /secrets\./i.test(content)) {
+              issues.push(`${RED}HIGH:${RST} actions/cache in workflow with publish secrets — remove cache from release pipelines`);
             }
             // Check for secrets in triage/issue workflows
-            if (/on:\s*\n\s*issues/i.test(content) && /secrets\./i.test(content)) {
+            if (/on:\s*\n\s*issues/m.test(content) && /secrets\./i.test(content)) {
               issues.push(`${RED}HIGH:${RST} Secrets exposed in issue-triggered workflow`);
             }
-            // Check for publish tokens
+            // Check for publish tokens without branch protection
             if (/(NPM_TOKEN|VSCE_PAT|OVSX_PAT|PYPI_TOKEN)/i.test(content)) {
               if (!/\bif:\s*github\.ref\s*==\s*'refs\/heads\/main'/i.test(content)) {
                 issues.push(`${YELLOW}MEDIUM:${RST} Publish token without branch protection check`);
               }
+            }
+            // Cacheract IoC: references to cache stuffing, eviction manipulation
+            for (const ioc of CACHERACT_IOC_PATTERNS) {
+              if (ioc.test(content)) {
+                issues.push(`${RED}CRITICAL:${RST} Cacheract IoC detected: ${ioc.source}`);
+                break;
+              }
+            }
+            // Publisher-scope PAT warning (VSCE/OpenVSX PATs are publisher-scoped, not extension-scoped)
+            if (/VSCE_PAT|OVSX_PAT/i.test(content)) {
+              issues.push(`${YELLOW}INFO:${RST} VSCE/OpenVSX PATs are publisher-scoped (not per-extension). Nightly PAT can publish production!`);
             }
             
             if (issues.length) {
@@ -419,7 +494,18 @@ export default function (pi: ExtensionAPI) {
             }
           }
           out += `\n${totalIssues ? `${RED}${B}${totalIssues} issues found` : `${GREEN}${B}All clean`}${RST} across ${yamlFiles.length} workflow files`;
-          auditLog({ type: "scan", action: "cicd_security_scan", files: yamlFiles.length, issues: totalIssues });
+          
+          // Summary advice
+          if (totalIssues) {
+            out += `\n\n${B}Remediation (from Clinejection lessons):${RST}\n`;
+            out += `  1. ${B}Never share cache keys${RST} between triage and release workflows\n`;
+            out += `  2. ${B}Remove actions/cache${RST} from workflows with publish secrets\n`;
+            out += `  3. ${B}Use separate publisher accounts${RST} for nightly vs production releases\n`;
+            out += `  4. ${B}Minimize agent tools${RST} — Read-only for triage, no Bash/Write\n`;
+            out += `  5. ${B}Sanitize user input${RST} — never interpolate issue title/body into prompts\n`;
+          }
+          
+          auditLog({ type: "scan", action: "cicd_security_scan", files: yamlFiles.length, issues: totalIssues, version: "2.3.0" });
         }
         return out;
       }
