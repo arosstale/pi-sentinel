@@ -1,13 +1,15 @@
 /**
- * pi-sentinel — Agent Security Framework
+ * pi-sentinel v2.2.0 — Agent Security Framework
  * 
  * Immutable audit trail, permission policies, session integrity, anomaly detection.
  * Based on 0DIN research (Feb 2026): "Context is the control plane."
+ * + Clinejection supply chain attack patterns (Mar 2026, Adnan Khan)
  * 
  * /sentinel status       → show current policies and audit stats
  * /sentinel audit [n]    → show last N audit entries
  * /sentinel policy       → view/edit permission policies
  * /sentinel scan         → security scan of session files
+ * /sentinel cicd         → scan GitHub Actions workflows for Clinejection patterns
  * /sentinel export       → export audit trail as JSON
  * 
  * Tools: sentinel_policy, sentinel_audit, sentinel_scan
@@ -104,6 +106,36 @@ const REFRAME_PATTERNS = [
   /pretend\s+(you\s+are|there\s+are)\s+no\s+(rules|restrictions|safety)/i,
 ];
 
+// ── Clinejection-Style Attack Patterns (Supply Chain via Prompt Injection) ─
+// Based on Adnan Khan's disclosure (Feb 2026): GitHub issue title → Claude → npm publish
+// See: simonwillison.net/2026/Mar/6/clinejection/
+const SUPPLY_CHAIN_PATTERNS: BlockRule[] = [
+  // Cache poisoning (GitHub Actions cache manipulation)
+  { pattern: /\bactions\/cache@.*restore-keys/i, reason: "GitHub Actions cache restore-keys can enable cache poisoning", suggestion: "Use exact cache keys, not prefix-based restore-keys" },
+  { pattern: /\bcache\s+.*>.*10\s*GB/i, reason: "Abnormally large cache (Cacheract-style LRU eviction attack)" },
+  // Tool overprovisioning in CI/CD
+  { pattern: /\ballowed[_-]?tools\s*[=:]\s*["']?.*Bash.*Write.*Edit/i, reason: "Overly permissive agent tools in CI (Clinejection vector)", suggestion: "Restrict to Read,WebFetch only for triage workflows" },
+  { pattern: /\ballowed[_-]?non[_-]?write[_-]?users\s*[=:]\s*["']?\*/i, reason: "Wildcard non-write user access — any GitHub user can trigger agent (Clinejection vector)", suggestion: "Restrict to repo collaborators" },
+  // Token/credential exfiltration patterns
+  { pattern: /\b(VSCE_PAT|NPM_TOKEN|OVSX_PAT|PYPI_TOKEN|GH_TOKEN)\b.*\b(curl|wget|fetch|http)/i, reason: "Credential exfiltration attempt — publishing tokens sent to external endpoint" },
+  { pattern: /\bsecrets\.[A-Z_]+.*\b(curl|wget|nc|ncat)\b/i, reason: "GitHub secret being sent to external service" },
+  // Prompt injection in interpolated user input
+  { pattern: /\$\{\{\s*github\.event\.(issue|pull_request)\.(title|body)\s*\}\}/i, reason: "User-controlled input interpolated into agent prompt (prompt injection vector)", suggestion: "Sanitize or use indirect reference" },
+  // Preinstall/postinstall scripts (supply chain)
+  { pattern: /\b(preinstall|postinstall|prepare)\b.*\b(curl|wget|node\s+-e|python\s+-c)\b/i, reason: "npm lifecycle script with network/exec — supply chain risk" },
+  // Publishing from CI without approval gate
+  { pattern: /\bnpm\s+publish\b.*--access\s+public/i, reason: "npm publish to public registry — verify this is intentional" },
+  { pattern: /\bvsce\s+publish\b/i, reason: "VSCode extension publish — verify release approval gate exists" },
+];
+
+// ── CI/CD Security Audit Patterns ─────────────────────────────────
+const CI_SECURITY_CHECKS = [
+  { file: ".github/workflows/*.yml", check: "cache-isolation", desc: "Triage and release workflows should NOT share cache keys" },
+  { file: ".github/workflows/*.yml", check: "secret-separation", desc: "Triage PATs ≠ release PATs (principle of least privilege)" },
+  { file: ".github/workflows/*.yml", check: "tool-restriction", desc: "Agent tools should be minimal for each workflow purpose" },
+  { file: ".github/workflows/*.yml", check: "input-sanitization", desc: "User input (issue title/body) must not be interpolated into prompts" },
+];
+
 function detectReframes(text: string): string[] {
   return REFRAME_PATTERNS
     .filter(p => p.test(text))
@@ -196,13 +228,15 @@ const BLOCKED_COMMANDS: BlockRule[] = [
   { pattern: /\brd\s+\/s\s+\/q\b/i, reason: "rd /s /q is Windows rm -rf" },
   { pattern: /\bformat\s+[A-Z]:/i, reason: "Formatting a drive" },
   { pattern: /\bdel\s+\/[sfq].*\\\*/i, reason: "del with wildcards on Windows" },
+  // ── Clinejection Supply Chain Patterns (Mar 2026) ──────────────
+  ...SUPPLY_CHAIN_PATTERNS,
 ];
 
 export default function (pi: ExtensionAPI) {
   ensureDir();
   
   // Log extension load itself
-  auditLog({ type: "system", action: "sentinel_loaded", version: "2.0.0" });
+  auditLog({ type: "system", action: "sentinel_loaded", version: "2.2.0" });
 
   // ── Safety-Critical Paths (self-modification detection) ─────────
   // Based on Palisade Research: o3 altered its own shutdown script
@@ -258,7 +292,7 @@ export default function (pi: ExtensionAPI) {
   });
   
   pi.registerCommand("sentinel", {
-    description: "Agent security: /sentinel status|audit|policy|scan|export",
+    description: "Agent security: /sentinel status|audit|policy|scan|cicd|export",
     handler: async (args, ctx) => {
       const sub = (args || "").trim().split(/\s+/);
       const cmd = sub[0] || "status";
@@ -332,6 +366,64 @@ export default function (pi: ExtensionAPI) {
         return out;
       }
       
+      if (cmd === "cicd" || cmd === "ci") {
+        // Scan local .github/workflows for Clinejection-style vulnerabilities
+        const { readdirSync: readDir2, readFileSync: readFile2, existsSync: exists2 } = await import("node:fs");
+        const { join: join2 } = await import("node:path");
+        const workflowDir = join2(process.cwd(), ".github", "workflows");
+        let out = `${B}${CYAN}🔒 CI/CD Security Scan (Clinejection Patterns)${RST}\n`;
+        out += `${D}Based on Adnan Khan's Cline supply chain attack disclosure${RST}\n\n`;
+        
+        if (!exists2(workflowDir)) {
+          out += `${YELLOW}No .github/workflows/ found in current directory.${RST}\n`;
+        } else {
+          const yamlFiles = readDir2(workflowDir).filter(f => f.endsWith(".yml") || f.endsWith(".yaml"));
+          let totalIssues = 0;
+          for (const file of yamlFiles) {
+            const content = readFile2(join2(workflowDir, file), "utf-8");
+            const issues: string[] = [];
+            
+            // Check for prompt injection vectors
+            if (/\$\{\{\s*github\.event\.(issue|pull_request)\.(title|body)\s*\}\}/.test(content)) {
+              issues.push(`${RED}CRITICAL:${RST} User input interpolated into workflow (prompt injection vector)`);
+            }
+            // Check for overly permissive agent tools
+            if (/allowed[_-]?tools.*Bash.*Write/i.test(content)) {
+              issues.push(`${RED}HIGH:${RST} Agent has Bash+Write tools — excessive for triage`);
+            }
+            if (/allowed[_-]?non[_-]?write[_-]?users.*\*/i.test(content)) {
+              issues.push(`${RED}HIGH:${RST} Wildcard non-write user access — any GitHub user can trigger`);
+            }
+            // Check cache sharing between workflows
+            if (/restore-keys/i.test(content) && /publish|release|deploy/i.test(content)) {
+              issues.push(`${YELLOW}MEDIUM:${RST} Cache restore-keys in release workflow — cache poisoning risk`);
+            }
+            // Check for secrets in triage/issue workflows
+            if (/on:\s*\n\s*issues/i.test(content) && /secrets\./i.test(content)) {
+              issues.push(`${RED}HIGH:${RST} Secrets exposed in issue-triggered workflow`);
+            }
+            // Check for publish tokens
+            if (/(NPM_TOKEN|VSCE_PAT|OVSX_PAT|PYPI_TOKEN)/i.test(content)) {
+              if (!/\bif:\s*github\.ref\s*==\s*'refs\/heads\/main'/i.test(content)) {
+                issues.push(`${YELLOW}MEDIUM:${RST} Publish token without branch protection check`);
+              }
+            }
+            
+            if (issues.length) {
+              out += `  ${RED}⚠️${RST} ${B}${file}${RST} — ${issues.length} issue(s)\n`;
+              for (const issue of issues) out += `    ${issue}\n`;
+              out += `\n`;
+              totalIssues += issues.length;
+            } else {
+              out += `  ${GREEN}✅${RST} ${file}\n`;
+            }
+          }
+          out += `\n${totalIssues ? `${RED}${B}${totalIssues} issues found` : `${GREEN}${B}All clean`}${RST} across ${yamlFiles.length} workflow files`;
+          auditLog({ type: "scan", action: "cicd_security_scan", files: yamlFiles.length, issues: totalIssues });
+        }
+        return out;
+      }
+      
       if (cmd === "scan") {
         auditLog({ type: "scan", action: "session_integrity_check" });
         const results = scanSessionFiles();
@@ -366,7 +458,7 @@ export default function (pi: ExtensionAPI) {
         return `${GREEN}✅ Exported ${entries.length} entries to:${RST}\n${exportPath}`;
       }
       
-      return `${YELLOW}Usage:${RST} /sentinel <status|audit [n]|policy [add|remove]|scan|export>`;
+      return `${YELLOW}Usage:${RST} /sentinel <status|audit [n]|policy [add|remove]|scan|cicd|export>`;
     }
   });
   
