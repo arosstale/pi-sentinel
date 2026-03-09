@@ -1,16 +1,18 @@
 /**
- * pi-sentinel v2.3.0 — Agent Security Framework
+ * pi-sentinel v2.4.0 — Agent Security Framework
  * 
  * Immutable audit trail, permission policies, session integrity, anomaly detection.
  * Based on 0DIN research (Feb 2026): "Context is the control plane."
  * + Clinejection supply chain attack patterns (Mar 2026, Adnan Khan)
  * + Cacheract IoC detection & cache-sharing audit (v2.3.0)
+ * + Gateway URL injection (CVE-2026-25253) & agentic browser threats (PleaseFix) (v2.4.0)
  * 
  * /sentinel status       → show current policies and audit stats
  * /sentinel audit [n]    → show last N audit entries
  * /sentinel policy       → view/edit permission policies
  * /sentinel scan         → security scan of session files
  * /sentinel cicd         → scan GitHub Actions workflows for Clinejection patterns
+ * /sentinel threats      → show current threat landscape
  * /sentinel export       → export audit trail as JSON
  * 
  * Tools: sentinel_policy, sentinel_audit, sentinel_scan
@@ -129,6 +131,30 @@ const SUPPLY_CHAIN_PATTERNS: BlockRule[] = [
   { pattern: /\bvsce\s+publish\b/i, reason: "VSCode extension publish — verify release approval gate exists" },
 ];
 
+// ── Gateway URL Injection Patterns (CVE-2026-25253, Feb 2026) ────
+// OpenClaw 1-click RCE: crafted ?gatewayUrl= redirects WebSocket + auth token to attacker
+// CWE-669: Incorrect Resource Transfer Between Spheres, CVSS 8.8
+const GATEWAY_INJECTION_PATTERNS: BlockRule[] = [
+  { pattern: /[?&](gateway|ws|api|websocket|socket|rpc)Url=https?:\/\/(?!localhost|127\.0\.0\.1)/i, reason: "Gateway URL injection — external WebSocket redirect (CVE-2026-25253 pattern)", suggestion: "Reject external gatewayUrl params; only allow localhost connections" },
+  { pattern: /[?&](gateway|ws|api)Url=wss?:\/\/(?!localhost|127\.0\.0\.1)/i, reason: "WebSocket URL injection to external endpoint (CVE-2026-25253)" },
+  { pattern: /\bauto[_-]?connect.*websocket.*token/i, reason: "Auto-connect WebSocket with token — verify user consent required" },
+  { pattern: /\b(auth|bearer|token)\b.*\b(ws|websocket|gateway)\b.*\b(send|emit|transmit)/i, reason: "Auth token sent via WebSocket — verify endpoint trust" },
+];
+
+// ── Agentic Browser Threat Patterns (PleaseFix/PerplexedBrowser, Mar 3 2026) ───
+// Zenity Labs: zero-click agent hijacking via indirect prompt injection in content
+// "This is not a bug. It is an inherent vulnerability in agentic systems." — Bargury
+const AGENTIC_BROWSER_PATTERNS: BlockRule[] = [
+  // Agent accessing credential managers
+  { pattern: /\b(1password|lastpass|bitwarden|keepass|credential[_-]?manager)\b.*\b(get|fetch|read|list|export)\b/i, reason: "Agent accessing credential manager (PleaseFix attack vector)", suggestion: "Credential manager access should require explicit user confirmation" },
+  // Agent processing untrusted content + filesystem access
+  { pattern: /\b(calendar|email|invite)\b.*\b(file|fs|filesystem|readFile|writeFile)\b/i, reason: "Content processing combined with filesystem access (PerplexedBrowser pattern)" },
+  // Data exfiltration during content processing
+  { pattern: /\b(fetch|http|request|curl|wget)\b.*\b(exfil|upload|send).*\b(token|credential|password|secret)\b/i, reason: "Potential data exfiltration of credentials via HTTP" },
+  // Agent inheriting browser session credentials
+  { pattern: /\b(cookie|session[_-]?id|auth[_-]?header)\b.*\b(inherit|pass[_-]?through|forward)\b/i, reason: "Agent inheriting browser session credentials — verify scope boundaries" },
+];
+
 // ── Cacheract IoC Patterns (from Clinejection deep-dive, Mar 8 2026) ─
 // Cacheract persists by overwriting actions/checkout action.yml post step.
 // IoC: post-checkout with no output (empty step), or checkout action with modified post field.
@@ -243,13 +269,17 @@ const BLOCKED_COMMANDS: BlockRule[] = [
   { pattern: /\bdel\s+\/[sfq].*\\\*/i, reason: "del with wildcards on Windows" },
   // ── Clinejection Supply Chain Patterns (Mar 2026) ──────────────
   ...SUPPLY_CHAIN_PATTERNS,
+  // ── Gateway URL Injection (CVE-2026-25253) ────────────────────
+  ...GATEWAY_INJECTION_PATTERNS,
+  // ── Agentic Browser Threats (PleaseFix/PerplexedBrowser) ──────
+  ...AGENTIC_BROWSER_PATTERNS,
 ];
 
 export default function (pi: ExtensionAPI) {
   ensureDir();
   
   // Log extension load itself
-  auditLog({ type: "system", action: "sentinel_loaded", version: "2.3.0" });
+  auditLog({ type: "system", action: "sentinel_loaded", version: "2.4.0" });
 
   // ── Safety-Critical Paths (self-modification detection) ─────────
   // Based on Palisade Research: o3 altered its own shutdown script
@@ -305,7 +335,7 @@ export default function (pi: ExtensionAPI) {
   });
   
   pi.registerCommand("sentinel", {
-    description: "Agent security: /sentinel status|audit|policy|scan|cicd|export",
+    description: "Agent security: /sentinel status|audit|policy|scan|cicd|threats|export",
     handler: async (args, ctx) => {
       const sub = (args || "").trim().split(/\s+/);
       const cmd = sub[0] || "status";
@@ -376,6 +406,48 @@ export default function (pi: ExtensionAPI) {
           out += `  ${color}${p.type.toUpperCase()}${RST} ${p.target}:${B}${p.pattern}${RST}`;
           out += ` ${D}name=${p.name}${p.reason ? ` — ${p.reason}` : ""}${RST}\n`;
         }
+        return out;
+      }
+      
+      if (cmd === "threats" || cmd === "threat") {
+        let out = `${B}${CYAN}🎯 Current Threat Landscape (Mar 9, 2026)${RST}\n\n`;
+        
+        out += `${RED}${B}CRITICAL — Active Threats${RST}\n`;
+        out += `  ${RED}●${RST} ${B}PleaseFix / PerplexedBrowser${RST} (Zenity Labs, Mar 3)\n`;
+        out += `    Zero-click agent hijacking via indirect prompt injection\n`;
+        out += `    Affects: Perplexity Comet + any agentic browser\n`;
+        out += `    Vector: Malicious calendar invite → agent inherits auth → file exfil + 1Password theft\n`;
+        out += `    ${D}Key: "ClickFix evolved — social engineering applied to agents, not humans"${RST}\n\n`;
+        
+        out += `  ${RED}●${RST} ${B}CVE-2026-25253: OpenClaw 1-Click RCE${RST} (CVSS 8.8)\n`;
+        out += `    CWE-669: ?gatewayUrl= redirects WebSocket + auth token to attacker\n`;
+        out += `    Kill chain: click link → auto-connect WS → steal token → modify sandbox → RCE\n`;
+        out += `    Fixed: v2026.1.29 (Jan 30). ${D}100K+ users affected.${RST}\n\n`;
+        
+        out += `  ${RED}●${RST} ${B}CVE-2026-0628: Chrome Gemini Panel Hijack${RST} (CVSS 8.8)\n`;
+        out += `    Rogue extensions escalate via Gemini Live WebView tag\n`;
+        out += `    Unit 42: insufficient policy enforcement → local file access + surveillance\n`;
+        out += `    ${D}Google patched. Browser-embedded AI inherits extension permissions.${RST}\n\n`;
+        
+        out += `${YELLOW}${B}HIGH — Supply Chain Risks${RST}\n`;
+        out += `  ${YELLOW}●${RST} ${B}Clinejection / Cacheract${RST} (Feb 2026, Adnan Khan)\n`;
+        out += `    Cache poisoning + tool overprovisioning in CI/CD agents\n`;
+        out += `    Run: ${CYAN}/sentinel cicd${RST} to scan your workflows\n\n`;
+        
+        out += `  ${YELLOW}●${RST} ${B}Defense Production Act${RST} (Mar 2026)\n`;
+        out += `    Anthropic designated 'supply-chain risk to national security'\n`;
+        out += `    DPA could force guardrail removal from AI models\n`;
+        out += `    Run: ${CYAN}/comply us${RST} for tracking\n\n`;
+        
+        out += `${B}Detection Coverage:${RST}\n`;
+        out += `  Supply chain patterns: ${GREEN}${SUPPLY_CHAIN_PATTERNS.length}${RST} rules\n`;
+        out += `  Gateway injection:     ${GREEN}${GATEWAY_INJECTION_PATTERNS.length}${RST} rules\n`;
+        out += `  Agentic browser:       ${GREEN}${AGENTIC_BROWSER_PATTERNS.length}${RST} rules\n`;
+        out += `  Cacheract IoC:         ${GREEN}${CACHERACT_IOC_PATTERNS.length}${RST} rules\n`;
+        out += `  Destructive commands:  ${GREEN}${BLOCKED_COMMANDS.length}${RST} rules\n`;
+        out += `  Reframe detection:     ${GREEN}${REFRAME_PATTERNS.length}${RST} rules\n`;
+        
+        auditLog({ type: "query", action: "threat_landscape_viewed" });
         return out;
       }
       
