@@ -1,11 +1,12 @@
 /**
- * pi-sentinel v2.4.0 — Agent Security Framework
+ * pi-sentinel v2.5.0 — Agent Security Framework
  * 
  * Immutable audit trail, permission policies, session integrity, anomaly detection.
  * Based on 0DIN research (Feb 2026): "Context is the control plane."
  * + Clinejection supply chain attack patterns (Mar 2026, Adnan Khan)
  * + Cacheract IoC detection & cache-sharing audit (v2.3.0)
  * + Gateway URL injection (CVE-2026-25253) & agentic browser threats (PleaseFix) (v2.4.0)
+ * + SSRF/path-traversal patterns from Endor Labs OpenClaw audit (6 CVEs, v2.5.0)
  * 
  * /sentinel status       → show current policies and audit stats
  * /sentinel audit [n]    → show last N audit entries
@@ -155,6 +156,23 @@ const AGENTIC_BROWSER_PATTERNS: BlockRule[] = [
   { pattern: /\b(cookie|session[_-]?id|auth[_-]?header)\b.*\b(inherit|pass[_-]?through|forward)\b/i, reason: "Agent inheriting browser session credentials — verify scope boundaries" },
 ];
 
+// ── SSRF & Path Traversal in Agent Infrastructure (Endor Labs, Feb 2026) ────
+// CVE-2026-26322 (CVSS 7.6): SSRF via Gateway tool
+// CVE-2026-26329: Path traversal in browser upload
+// CVE-2026-26319 (CVSS 7.5): Missing webhook auth
+// "Trust boundaries extend beyond traditional user input — config values,
+//  LLM outputs, and tool parameters are potential attack surfaces." — Endor Labs
+const AGENT_INFRA_PATTERNS: BlockRule[] = [
+  // SSRF via tool/config parameters
+  { pattern: /\b(fetch|request|http\.get|axios|got)\s*\(\s*[^)]*169\.254\.169\.254/i, reason: "SSRF to cloud metadata endpoint (CVE-2026-26322 pattern)", suggestion: "Block requests to 169.254.169.254 and internal IPs" },
+  { pattern: /\b(fetch|request|http\.get)\s*\(\s*[^)]*(?:localhost|127\.0\.0\.1|0\.0\.0\.0):\d+.*(?:admin|internal|_debug)/i, reason: "SSRF to internal admin endpoint" },
+  // Path traversal in file operations
+  { pattern: /\.\.[\/\\].*\.\.[\/\\].*(?:etc\/passwd|windows\/system32|\.ssh|\.env)/i, reason: "Path traversal to sensitive files (CVE-2026-26329 pattern)" },
+  { pattern: /[?&](?:file|path|upload|dir)=.*\.\.[\/\\]/i, reason: "Path traversal in URL parameter" },
+  // Missing auth on webhook endpoints
+  { pattern: /\bapp\.(post|get)\s*\(\s*['"]\/(?:webhook|hook|callback|notify)['"]\s*,\s*(?:async\s+)?\(req/i, reason: "Webhook endpoint without auth middleware (CVE-2026-26319 pattern)", suggestion: "Add signature verification middleware" },
+];
+
 // ── Cacheract IoC Patterns (from Clinejection deep-dive, Mar 8 2026) ─
 // Cacheract persists by overwriting actions/checkout action.yml post step.
 // IoC: post-checkout with no output (empty step), or checkout action with modified post field.
@@ -273,13 +291,15 @@ const BLOCKED_COMMANDS: BlockRule[] = [
   ...GATEWAY_INJECTION_PATTERNS,
   // ── Agentic Browser Threats (PleaseFix/PerplexedBrowser) ──────
   ...AGENTIC_BROWSER_PATTERNS,
+  // ── SSRF & Path Traversal (Endor Labs OpenClaw audit, Feb 2026) ──
+  ...AGENT_INFRA_PATTERNS,
 ];
 
 export default function (pi: ExtensionAPI) {
   ensureDir();
   
   // Log extension load itself
-  auditLog({ type: "system", action: "sentinel_loaded", version: "2.4.0" });
+  auditLog({ type: "system", action: "sentinel_loaded", version: "2.5.0" });
 
   // ── Safety-Critical Paths (self-modification detection) ─────────
   // Based on Palisade Research: o3 altered its own shutdown script
@@ -439,10 +459,16 @@ export default function (pi: ExtensionAPI) {
         out += `    DPA could force guardrail removal from AI models\n`;
         out += `    Run: ${CYAN}/comply us${RST} for tracking\n\n`;
         
+        out += `  ${YELLOW}●${RST} ${B}Endor Labs: 6 New OpenClaw CVEs${RST} (Feb 2026)\n`;
+        out += `    SSRF (CVE-2026-26322, CVSS 7.6), path traversal (CVE-2026-26329), auth bypass\n`;
+        out += `    "Only 10% of AI-generated code is both correct AND secure" — CMU/Columbia/JHU\n`;
+        out += `    ${D}AURI: free AI-SAST that traces LLM→tool data flows${RST}\n\n`;
+        
         out += `${B}Detection Coverage:${RST}\n`;
         out += `  Supply chain patterns: ${GREEN}${SUPPLY_CHAIN_PATTERNS.length}${RST} rules\n`;
         out += `  Gateway injection:     ${GREEN}${GATEWAY_INJECTION_PATTERNS.length}${RST} rules\n`;
         out += `  Agentic browser:       ${GREEN}${AGENTIC_BROWSER_PATTERNS.length}${RST} rules\n`;
+        out += `  Agent infra (SSRF/PT): ${GREEN}${AGENT_INFRA_PATTERNS.length}${RST} rules\n`;
         out += `  Cacheract IoC:         ${GREEN}${CACHERACT_IOC_PATTERNS.length}${RST} rules\n`;
         out += `  Destructive commands:  ${GREEN}${BLOCKED_COMMANDS.length}${RST} rules\n`;
         out += `  Reframe detection:     ${GREEN}${REFRAME_PATTERNS.length}${RST} rules\n`;
