@@ -1,5 +1,5 @@
 /**
- * pi-sentinel v2.5.0 — Agent Security Framework
+ * pi-sentinel v2.6.0 — Agent Security Framework
  * 
  * Immutable audit trail, permission policies, session integrity, anomaly detection.
  * Based on 0DIN research (Feb 2026): "Context is the control plane."
@@ -7,6 +7,7 @@
  * + Cacheract IoC detection & cache-sharing audit (v2.3.0)
  * + Gateway URL injection (CVE-2026-25253) & agentic browser threats (PleaseFix) (v2.4.0)
  * + SSRF/path-traversal patterns from Endor Labs OpenClaw audit (6 CVEs, v2.5.0)
+ * + CVE-2026-2256 MS-Agent denylist bypass + OpenClaw ClawJacked patterns (v2.6.0)
  * 
  * /sentinel status       → show current policies and audit stats
  * /sentinel audit [n]    → show last N audit entries
@@ -171,6 +172,14 @@ const AGENT_INFRA_PATTERNS: BlockRule[] = [
   { pattern: /[?&](?:file|path|upload|dir)=.*\.\.[\/\\]/i, reason: "Path traversal in URL parameter" },
   // Missing auth on webhook endpoints
   { pattern: /\bapp\.(post|get)\s*\(\s*['"]\/(?:webhook|hook|callback|notify)['"]\s*,\s*(?:async\s+)?\(req/i, reason: "Webhook endpoint without auth middleware (CVE-2026-26319 pattern)", suggestion: "Add signature verification middleware" },
+  // CVE-2026-2256: MS-Agent regex-denylist bypass patterns
+  { pattern: /check_safe\s*\(.*\)\s*.*(?:denylist|blocklist|blacklist)/i, reason: "Denylist-based command filtering (CVE-2026-2256 anti-pattern)", suggestion: "Use strict allowlist instead of denylist for shell commands" },
+  { pattern: /\b(?:python|perl|ruby|node)\s+-[ce]\s+['"].*(?:exec|system|popen|subprocess)/i, reason: "Interpreter-based shell bypass (CVE-2026-2256 pattern)", suggestion: "Block interpreter execution of arbitrary code strings" },
+  { pattern: /\$\(.*\)|`[^`]*`.*(?:rm|curl|wget|nc|ncat)/i, reason: "Shell metacharacter command substitution with dangerous command" },
+  // OpenClaw ClawJacked patterns
+  { pattern: /\bbind\s*\(\s*['"]0\.0\.0\.0['"]/i, reason: "Binding to all interfaces (ClawJacked pattern)", suggestion: "Bind to 127.0.0.1 for local-only services" },
+  { pattern: /(?:websocket|ws)\s*.*(?:localhost|127\.0\.0\.1).*(?:auto[_-]?approv|silent.*register|no.*rate[_-]?limit)/i, reason: "WebSocket localhost trust without rate limiting (ClawJacked pattern)" },
+  { pattern: /\blog\s*.*(?:inject|poison|write.*websocket|untrusted.*prompt)/i, reason: "Log poisoning via untrusted input (OpenClaw advisory pattern)" },
 ];
 
 // ── Cacheract IoC Patterns (from Clinejection deep-dive, Mar 8 2026) ─
