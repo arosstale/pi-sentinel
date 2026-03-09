@@ -172,8 +172,10 @@ const AGENT_INFRA_PATTERNS: BlockRule[] = [
   { pattern: /[?&](?:file|path|upload|dir)=.*\.\.[\/\\]/i, reason: "Path traversal in URL parameter" },
   // Missing auth on webhook endpoints
   { pattern: /\bapp\.(post|get)\s*\(\s*['"]\/(?:webhook|hook|callback|notify)['"]\s*,\s*(?:async\s+)?\(req/i, reason: "Webhook endpoint without auth middleware (CVE-2026-26319 pattern)", suggestion: "Add signature verification middleware" },
-  // CVE-2026-2256: MS-Agent regex-denylist bypass patterns
-  { pattern: /check_safe\s*\(.*\)\s*.*(?:denylist|blocklist|blacklist)/i, reason: "Denylist-based command filtering (CVE-2026-2256 anti-pattern)", suggestion: "Use strict allowlist instead of denylist for shell commands" },
+  // CVE-2026-2256: MS-Agent Shell tool RCE (CVSS 9.8, CWE-77)
+  // check_safe() regex denylist bypassed via ;, &&, $(), interpreter -c, encoding tricks
+  // AV:N/AC:L/PR:N/UI:N — unauthenticated remote attacker can inject via prompt API
+  { pattern: /check_safe\s*\(.*\)\s*.*(?:denylist|blocklist|blacklist)/i, reason: "Denylist-based command filtering (CVE-2026-2256, CVSS 9.8)", suggestion: "Use strict allowlist instead of denylist for shell commands" },
   { pattern: /\b(?:python|perl|ruby|node)\s+-[ce]\s+['"].*(?:exec|system|popen|subprocess)/i, reason: "Interpreter-based shell bypass (CVE-2026-2256 pattern)", suggestion: "Block interpreter execution of arbitrary code strings" },
   { pattern: /\$\(.*\)|`[^`]*`.*(?:rm|curl|wget|nc|ncat)/i, reason: "Shell metacharacter command substitution with dangerous command" },
   // OpenClaw ClawJacked patterns
